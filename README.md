@@ -42,12 +42,6 @@ ci-failures/
 │       └── cache/ , cache_ann/               gitignored, built on run, self-refreshing
 │
 ├── Tree.png                 Classifier decision-tree diagram (shown in RESULTS)
-│
-└── verify/                  Reliability proof: manual "blind" audit against the logs
-    ├── SPEC.md · reconcile.py
-    ├── blind_*.txt          The reviewer's manual classification
-    ├── result_*.tsv         The comparison against the classifier
-    └── review_corpus.{csv,json}
 ```
 
 ---
