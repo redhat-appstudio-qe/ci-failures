@@ -1,166 +1,166 @@
-<div dir="rtl">
+# CI Failure Analysis — Process, Method, Results, and Conclusions
 
-# ניתוח כשלי CI — תהליך, שיטה, תוצאות ומסקנות
+A full, self-contained summary of the project: what we did, how the classifier works, what the
+categories are, what the results are, and what the conclusions are. Whoever takes over the project
+can read only this document and understand everything, like the person who built it.
+For operating the code and the structure — see [README.md](README.md).
 
-סיכום מלא ועצמאי של הפרויקט: מה עשינו, איך המסווג עובד, מה הקטגוריות, מה התוצאות, ומה
-המסקנות. מי שלוקח את הפרויקט יכול לקרוא רק את המסמך הזה ולהבין הכול כמו מי שפיתח.
-לתפעול הקוד והמבנה — ראו [README.md](README.md).
-
-**מקור-אמת למספרים:** הדאטה-סטים בתיקיות הריפויים.
-
----
-
-## מקורות המחקר (בסיס להחלטות הסיווג)
-
-- **טקסונומיה:** Zheng et al., *Why Do GitHub Actions Workflows Fail?*, ACM TOSEM 2025 — [DOI](https://dl.acm.org/doi/10.1145/3749371) (W8 = 6/375 = 1.6%).
-- **flaky ללא re-run:** An et al., *Just-in-Time Flaky Test Detection via Abstracted Failure Symptom Matching*, ICSME 2024 — [arXiv](https://arxiv.org/abs/2310.06298) (≥96% precision); DeFlaker, ICSE 2018 — [PDF](https://www.cs.cornell.edu/~legunsen/pubs/BellETAL18DeFlaker.pdf) (diff-reachability).
-- **confidence תלת-ערכי:** Meta *Probabilistic Flakiness Score* — [link](https://engineering.fb.com/2020/12/10/developer-tools/probabilistic-flakiness/); iDFlakies, ICST 2019 (unknown-bucket).
-- **base-rate:** Micco, *Flaky Tests at Google*, 2016 — [link](https://testing.googleblog.com/2016/05/flaky-tests-at-google-and-how-we.html) (84% מ-Pass→Fail הם flaky).
+**Source of truth for the numbers:** the datasets in the repo directories.
 
 ---
 
-## 1. המטרה
+## Research Sources (basis for the classification decisions)
 
-לענות על שאלה מעשית אחת: **כשה-CI שלנו נכשל — מה באמת גרם לזה, ומי אמור לתקן?**
-כדי לענות בנינו שלושה דברים:
-
-1. **מסווג אוטומטי** ([classify.py](Code/classify.py)) שמקבל כשל CI גולמי ומחזיר **קטגוריית-שורש אחת** מתוך טקסונומיה קבועה.
-2. **פייפליין** ([pipeline.py](Code/pipeline.py)) שאוסף כל כשל מ-GitHub Actions, מחלץ את שורת-השגיאה, ומריץ את המסווג על כולם.
-3. **קבוצת-בקרה (Benchmark)** — שני ריפויי CNCF חיצוניים בוגרים (ESO, Kyverno) שעליהם הרצנו את **אותו מסווג בדיוק**, כדי להכריע אם הפרופיל שלנו הוא "רעש-שגרה נורמלי" או חריג שמסמן בעיה אמיתית.
-
-הטקסונומיה לקוחה ממאמר אקדמי: *"Why Do GitHub Actions Workflows Fail?"* (Zheng et al., ACM TOSEM 2025) — 16 קטגוריות: **P1–P8** ברובד הפרויקט, **W1–W8** ברובד ה-workflow.
+- **Taxonomy:** Zheng et al., *Why Do GitHub Actions Workflows Fail?*, ACM TOSEM 2025 — [DOI](https://dl.acm.org/doi/10.1145/3749371) (W8 = 6/375 = 1.6%).
+- **flaky without re-run:** An et al., *Just-in-Time Flaky Test Detection via Abstracted Failure Symptom Matching*, ICSME 2024 — [arXiv](https://arxiv.org/abs/2310.06298) (≥96% precision); DeFlaker, ICSE 2018 — [PDF](https://www.cs.cornell.edu/~legunsen/pubs/BellETAL18DeFlaker.pdf) (diff-reachability).
+- **three-valued confidence:** Meta *Probabilistic Flakiness Score* — [link](https://engineering.fb.com/2020/12/10/developer-tools/probabilistic-flakiness/); iDFlakies, ICST 2019 (unknown-bucket).
+- **base-rate:** Micco, *Flaky Tests at Google*, 2016 — [link](https://testing.googleblog.com/2016/05/flaky-tests-at-google-and-how-we.html) (84% of Pass→Fail are flaky).
 
 ---
 
-## 2. התהליך — שלבי הניסוי
+## 1. The Goal
 
-1. **איסוף** — משיכת הריצות הכושלות מ-workflows נבחרים בכל ריפו, עם תיוג לפי workflow.
-2. **העשרה** — לכל ריצה: actor, PR, commit, job כושל, causing-step מול reporting-step (`gh api .../jobs`).
-3. **חילוץ אות** — הודעת השגיאה מהלוג של ה-job הכושל (`gh run view --log-failed`), עם דילוג על עוטפים גנריים.
-4. **שחזור** — כשהלוג פג (410 Gone): שחזור אות מ-check-run **annotations** (העלה את כיסוי-האות ב-etcd מ-14% ל-95%).
-5. **סיווג** — עץ-החלטה "שכבה-קודם" ל-16 הקטגוריות, מצליב TYPE + STEP + ACTOR + תוכן-הלוג.
-6. **דדופ** — נרמול signature (הסרת paths/UUIDs/versions) → מציאת הכשלים הייחודיים.
-7. **ולידציה ידנית** — מעבר ידני על כל signature מול הלוג **החי**; כשה-`raw_error` השמור לא היה שורת-השורש — חילוץ-מחדש מהלוג או שחזור מ-annotations, כולל היסק חוצה-workflow.
-8. **דיווח** — טבלאות לפי קטגוריה / שכבה / actor / fixable-by + זיהוי flaky.
+To answer one practical question: **when our CI fails — what actually caused it, and who should fix it?**
+To answer it, we built three things:
 
-**הדאטה שנאסף — ריצות CI כושלות לכל ריפו:**
+1. **An automatic classifier** ([classify.py](Code/classify.py)) that takes a raw CI failure and returns **a single root category** from a fixed taxonomy.
+2. **A pipeline** ([pipeline.py](Code/pipeline.py)) that collects every failure from GitHub Actions, extracts the error line, and runs the classifier on all of them.
+3. **A control group (Benchmark)** — two mature external CNCF repos (ESO, Kyverno) on which we ran the **exact same classifier**, to decide whether our profile is "normal routine noise" or an anomaly signaling a real problem.
 
-| ריפו | סוג | ריצות כושלות |
+The taxonomy is taken from an academic paper: *"Why Do GitHub Actions Workflows Fail?"* (Zheng et al., ACM TOSEM 2025) — 16 categories: **P1–P8** at the project layer, **W1–W8** at the workflow layer.
+
+---
+
+## 2. The Process — Experiment Stages
+
+1. **Collection** — pulling the failed runs from selected workflows in each repo, tagged by workflow.
+2. **Enrichment** — for each run: actor, PR, commit, failed job, causing-step vs reporting-step (`gh api .../jobs`).
+3. **Signal extraction** — the error message from the failed job's log (`gh run view --log-failed`), skipping generic wrappers.
+4. **Recovery** — when the log has expired (410 Gone): recover the signal from check-run **annotations** (raised signal coverage on etcd from 14% to 95%).
+5. **Classification** — a "layer-first" decision tree for the 16 categories, crossing TYPE + STEP + ACTOR + log content.
+6. **Dedup** — signature normalization (stripping paths/UUIDs/versions) → finding the unique failures.
+7. **Manual validation** — a manual pass over every signature against the **live** log; when the stored `raw_error` was not the root line — re-extracting from the log or recovering from annotations, including cross-workflow inference.
+8. **Reporting** — tables by category / layer / actor / fixable-by + flaky detection.
+
+**The data collected — failed CI runs per repo:**
+
+| Repo | Type | Failed runs |
 |---|---|---|
-| MPC | צוות | 400 |
-| MAY | צוות | 248 |
-| etcd-shield | צוות | 406 |
-| namespace-lister | צוות | 396 |
-| ESO | בקרה | 600 |
-| Kyverno | בקרה | 600 |
+| MPC | team | 400 |
+| MAY | team | 248 |
+| etcd-shield | team | 406 |
+| namespace-lister | team | 396 |
+| ESO | control | 600 |
+| Kyverno | control | 600 |
 
-נאסף לכל כשל (שורה אחת ב-`<pre>_dataset_all.csv`):
-`workflow` · `actor`→`author_type` · `PR` · `commit` · `failed_job` · `causing_step` מול `reporting_step` · `raw_error` · `failure_signature` · `category` · `stage` · `fixable_by` · `signal_source` (live / annotation / ריק).
-> הבדלי-סכמה קטנים בין הריפויים: `signal_source` (ו-`tag`) קיימים רק בריפויים שנאספו מאוחר (nl / ESO / Kyverno); ב-MPC/MAY/ETCD הם אינם.
+Collected per failure (one row in `<pre>_dataset_all.csv`):
+`workflow` · `actor`→`author_type` · `PR` · `commit` · `failed_job` · `causing_step` vs `reporting_step` · `raw_error` · `failure_signature` · `category` · `stage` · `fixable_by` · `signal_source` (live / annotation / empty).
+> Small schema differences between repos: `signal_source` (and `tag`) exist only in repos collected later (nl / ESO / Kyverno); in MPC/MAY/ETCD they are absent.
 
 ---
 
-## 3. מבנה כשל ב-CI, ומה המסווג מקבל כקלט
+## 3. The Structure of a CI Failure, and What the Classifier Receives as Input
 
-מבנה ריצה ב-GitHub: `Run` → מכיל → `Jobs` → מכילים → `Steps`.
+The structure of a run on GitHub: `Run` → contains → `Jobs` → contain → `Steps`.
 
-כשריצה נכשלת, הפייפליין מחלץ **רק שני שדות — וזה כל מה שהמסווג רואה:**
+When a run fails, the pipeline extracts **only two fields — and that is all the classifier sees:**
 
-| שדה | מה זה | דוגמה |
+| Field | What it is | Example |
 |---|---|---|
-| `causing_step` | שם ה-**step שגרם** לכשל (לא ה-step המדווח) | `Run golangci-lint` |
-| `raw_error` | **שורת-השגיאה** עצמה, מהלוג | `client.go:26:1: File is not properly formatted (gci)` |
+| `causing_step` | The name of the **step that caused** the failure (not the reporting step) | `Run golangci-lint` |
+| `raw_error` | The **error line** itself, from the log | `client.go:26:1: File is not properly formatted (gci)` |
 
-**הבחנה מרכזית: causing-step מול reporting-step.** הכשל ה"אמיתי" קורה ב-step אחד (compile/test),
-אבל לפעמים step מאוחר (upload/notify/comment) הוא זה ש"צובע" את הריצה באדום. הפייפליין מפריד
-ולוקח את ה**גורם**, לא את ה**מדווח**.
+**Key distinction: causing-step vs reporting-step.** The "real" failure happens in one step (compile/test),
+but sometimes a later step (upload/notify/comment) is the one that "paints" the run red. The pipeline
+separates them and takes the **cause**, not the **reporter**.
 
-**מהיכן מגיעה שורת-השגיאה (לפי עדיפות):**
-1. **לוג חי** — `gh run view --log-failed`, בהעדפת שורות `##[error]` אמיתיות על פני הדי-פקודות ואזהרות שפירות.
-2. **שחזור מ-annotations** — אם הלוג פג (GitHub מוחק לוגים אחרי ~90 יום), שליפת הודעות ה-annotation של ה-check-run.
-3. **אם אין כלום** → הכשל מסומן `NO_LOG` (אין אות לסיווג).
-
----
-
-## 4. חוקי המסווג
-
-המסווג הוא **עץ-החלטה יחיד, repo-agnostic**, הבנוי על עיקרון אחד:
-
-> **"first match wins"** — עוברים על החוקים מלמעלה למטה ועוצרים בהתאמה הראשונה.
-
-הסדר אינו שרירותי: **שורש-ספציפי נבדק לפני סימפטום-גנרי.** כלומר: infra → network → dependency
-→ compile → quality → tests, וסימפטום גנרי לעולם לא "גונב" שורש ספציפי יותר.
-
-![עץ סיווג כשלי CI](Tree.png)
-
-הכלל: `"test"` / `"lint"` בשם ה-step הם **מוצא-אחרון** — נבדקים רק אם אף דפוס-תוכן ספציפי לא התאים.
-
-**שתי הבחנות שנוספו לבקשת QE:**
-1. **רשת לפי יעד, לא לפי מילת-מפתח:** `connection refused` הוא *סימפטום*. תלות שבורה/לא-זמינה → **P3**; יעד תקין שזמנית לא-נגיש → **W3**.
-2. **W4 = תשתית מול מוצר:** אם KIND/kubeconfig/webhook/envtest נשברו → **W4**. אבל אם ה-**מוצר** (controller/deployment) קרס בתוך תשתית בריאה → זו קטגוריית **P** (אחרת כל E2E שבו המוצר לא עולה היה הופך בטעות ל"בעיית infra").
+**Where the error line comes from (by priority):**
+1. **Live log** — `gh run view --log-failed`, preferring real `##[error]` lines over command echoes and benign warnings.
+2. **Recovery from annotations** — if the log has expired (GitHub deletes logs after ~90 days), pulling the check-run's annotation messages.
+3. **If there is nothing** → the failure is marked `NO_LOG` (no signal to classify).
 
 ---
 
-## 5. הקטגוריות ותתי-הקטגוריות
+## 4. The Classifier Rules
 
-**16 הקטגוריות (+ מותאמות ל-QE), ומי מתקן כל אחת:**
+The classifier is **a single, repo-agnostic decision tree**, built on one principle:
 
-| קוד | שם / הסבר | רובד | מי מתקן |
+> **"first match wins"** — the rules are traversed top to bottom and stop at the first match.
+
+The order is not arbitrary: **a specific root is checked before a generic symptom.** That is:
+infra → network → dependency → compile → quality → tests, and a generic symptom never "steals"
+a more specific root.
+
+![CI failure classification tree](Tree.png)
+
+The rule: `"test"` / `"lint"` in the step name are **last resort** — checked only if no specific content pattern matched.
+
+**Two distinctions added at QE's request:**
+1. **Network by target, not by keyword:** `connection refused` is a *symptom*. A broken/unavailable dependency → **P3**; a valid target that is temporarily unreachable → **W3**.
+2. **W4 = infrastructure vs product:** if KIND/kubeconfig/webhook/envtest broke → **W4**. But if the **product** (controller/deployment) crashed inside a healthy infrastructure → that is a **P** category (otherwise every E2E where the product fails to come up would wrongly become an "infra problem").
+
+---
+
+## 5. The Categories and Sub-categories
+
+**The 16 categories (+ QE-tailored ones), and who fixes each:**
+
+| Code | Name / explanation | Layer | Who fixes |
 |---|---|---|---|
-| **P1** | קוד שלא עובר הידור — משתנה/import שלא בשימוש, שגיאת תחביר | Build | אדם / build-owner |
-| **P2** | הגדרות פרויקט לא תואמות סביבה — גרסת Go ב-`go.mod`/toolchain גבוהה מה-runner | Build | אדם / build-owner |
-| **P3** | לא ניתן להשיג תלות — מודול חסר, גרסה לא קיימת, cachi2 נכשל | Build | **MintMaker (dep bump)** |
-| **P4** | תלות הובאה אך שבורה מול הקוד — bump שינה API/interface | Build | **MintMaker (dep bump)** |
-| **P5** | בדיקות איכות נכשלו — golangci-lint / gofmt / yamllint | Quality | אדם / build-owner |
-| **P6** | סריקת אבטחה מצאה חולשה ידועה (CVE) בתלות | Security | אדם / build-owner |
-| **P7** | בדיקת ביצועים / benchmark נכשלה | Perf | אדם / build-owner |
-| **P8** | הקוד עלה ורץ אך טסט נכשל (assertion) — מפוצל לתתי-P8 למטה | Test | אדם / build-owner |
-| **W1** | מגבלת משאבים ב-runner — דיסק/זיכרון מלאים / התהליך נהרג | Infra | Infra/Env (retry) |
-| **W2** | קובץ ה-workflow שגוי — פקודה לא קיימת, YAML לא תקין | Config | מתחזק workflow |
-| **W3** | כשל רשת **חולף** — connection-refused/timeout/stream-error | Network | Infra/Env (retry) |
-| **W4** | תשתית-הטסט לא עלתה — KIND/kubeconfig/envtest/setup-action | Setup/Env | Infra/Env (retry) |
-| **W5** | אין הרשאה לצד-ג' — pull מ-registry / credentials / 403 | Perm | Infra/Env (retry) |
-| **W6** | Action חיצוני לא נפתר — שם/גרסה שגויים | Config | מתחזק workflow |
-| **W7** | חריגה ממכסת ה-API של GitHub (rate limit) | Infra | Infra/Env (retry) |
-| **W8** | version-control **בתוך** ריצה — duplicate tag / merge בתוך job (נדיר) | VCS | מתחזק workflow/VCS |
-| **W_BUILD_VET** | `build`/`go vet` נכשלו אך שורת-השגיאה לא נלכדה בלוג | Build | אדם / build-owner |
-| **NO_LOG** | אין אות שמיש — הלוג פג (410) **או** שהריצה לא יצרה job כלל (למשל fork-PR startup) | — | — |
-| **CANCELLED** | בוטל ע"י concurrency — **אינו כשל אמיתי** | — | — |
-| **UNCLASSIFIED** | לא סווג (בד"כ פער-חילוץ) | — | — |
+| **P1** | Code that does not compile — unused variable/import, syntax error | Build | Human / build-owner |
+| **P2** | Project config does not match the environment — Go version in `go.mod`/toolchain higher than the runner | Build | Human / build-owner |
+| **P3** | A dependency cannot be obtained — missing module, nonexistent version, cachi2 failed | Build | **MintMaker (dep bump)** |
+| **P4** | A dependency was fetched but is broken against the code — a bump changed an API/interface | Build | **MintMaker (dep bump)** |
+| **P5** | Quality checks failed — golangci-lint / gofmt / yamllint | Quality | Human / build-owner |
+| **P6** | A security scan found a known vulnerability (CVE) in a dependency | Security | Human / build-owner |
+| **P7** | A performance / benchmark test failed | Perf | Human / build-owner |
+| **P8** | The code built and ran but a test failed (assertion) — split into P8 sub-types below | Test | Human / build-owner |
+| **W1** | Resource limit on the runner — disk/memory full / the process was killed | Infra | Infra/Env (retry) |
+| **W2** | The workflow file is wrong — nonexistent command, invalid YAML | Config | workflow maintainer |
+| **W3** | A **transient** network failure — connection-refused/timeout/stream-error | Network | Infra/Env (retry) |
+| **W4** | The test infrastructure did not come up — KIND/kubeconfig/envtest/setup-action | Setup/Env | Infra/Env (retry) |
+| **W5** | No permission to a third party — pull from registry / credentials / 403 | Perm | Infra/Env (retry) |
+| **W6** | An external Action could not be resolved — wrong name/version | Config | workflow maintainer |
+| **W7** | GitHub API quota exceeded (rate limit) | Infra | Infra/Env (retry) |
+| **W8** | version-control **inside** a run — duplicate tag / merge inside a job (rare) | VCS | workflow/VCS maintainer |
+| **W_BUILD_VET** | `build`/`go vet` failed but the error line was not captured in the log | Build | Human / build-owner |
+| **NO_LOG** | No usable signal — the log expired (410) **or** the run produced no job at all (e.g., fork-PR startup) | — | — |
+| **CANCELLED** | Cancelled by concurrency — **not a real failure** | — | — |
+| **UNCLASSIFIED** | Not classified (usually an extraction gap) | — | — |
 
-> **קבוצת-העל `Infra Setup`** = W4+W5+W6 — שכבת-דיווח וניתוב-retry מעל העלים; העלים נשמרים לתאימות-לאחור מול המאמר ול-drill-down.
+> **The super-group `Infra Setup`** = W4+W5+W6 — a reporting and retry-routing layer above the leaves; the leaves are kept for backward compatibility with the paper and for drill-down.
 
-### תת-סיווג (Stage 2) — רק ל-P8 (כשלי-טסט)
+### Sub-classification (Stage 2) — only for P8 (test failures)
 
-כש-Stage-1 מחזיר **P8**, הריצה עוברת ל-[p8_subclassify.py](Code/p8_subclassify.py) שמכריע **Real / Flaky / Unknown**, לפי עדיפות:
-1. **קריסה דטרמיניסטית** (`panic:` / `[PANICKED!]` / duplicate-descriptor) → **Real / high**.
-2. **same-SHA rerun-to-pass** — בדיוק אותו commit עבר בריצה אחרת באותו workflow → **Flaky / high** (gold standard).
-3. **diff-reachability** [DeFlaker, ICSE 2018] — הפונקציה שנפלה **לא** שונתה ב-PR (נגעו רק ב-deps/Docker/workflow) → **Flaky / med**; אם שונתה → **Real / med**.
-4. **cross-PR + שונות-משך** — אותו טסט נופל על ≥2 PRs לא-קשורים בלי שינוי-קוד → **Flaky**.
-5. **אין ראיות מספיקות** → **Unknown / low** (תשובה לגיטימית, לא חולשה).
+When Stage-1 returns **P8**, the run passes to [p8_subclassify.py](Code/p8_subclassify.py), which decides **Real / Flaky / Unknown**, by priority:
+1. **Deterministic crash** (`panic:` / `[PANICKED!]` / duplicate-descriptor) → **Real / high**.
+2. **same-SHA rerun-to-pass** — the exact same commit passed in another run of the same workflow → **Flaky / high** (gold standard).
+3. **diff-reachability** [DeFlaker, ICSE 2018] — the function that failed was **not** changed in the PR (only deps/Docker/workflow were touched) → **Flaky / med**; if it was changed → **Real / med**.
+4. **cross-PR + duration variance** — the same test fails on ≥2 unrelated PRs with no code change → **Flaky**.
+5. **Insufficient evidence** → **Unknown / low** (a legitimate answer, not a weakness).
 
-> כל היוריסטיקות ה-flaky לקוחות ממאמרים בלבד — לא הומצאו. ראו מקורות בסוף.
+> All the flaky heuristics are taken from papers only — none were invented. See the sources at the top.
 
-### איך הופרד author_type (ו-CANCELLED)
+### How author_type was separated (and CANCELLED)
 
-סוג-היוצר נקבע מ-**`actor` login** של הריצה (מי דחף/פתח את ה-PR), לא מתוכן הלוג:
-- **MintMaker** — `red-hat-konflux[bot]` / `renovate` / `mintmaker` (בוט עדכוני-התלות של Konflux).
-- **Other-Bot / Automation** — כל login של בוט (`…[bot]` / `-bot` / `dependabot` / `kargo`) שאינו MintMaker.
-- **Human** — כל login שאינו בוט.
+The author type is determined from the run's **`actor` login** (who pushed/opened the PR), not from the log content:
+- **MintMaker** — `red-hat-konflux[bot]` / `renovate` / `mintmaker` (Konflux's dependency-update bot).
+- **Other-Bot / Automation** — any bot login (`…[bot]` / `-bot` / `dependabot` / `kargo`) that is not MintMaker.
+- **Human** — any login that is not a bot.
 
-> ⚠️ **הגבלה מודעת:** הפילוח בפועל הוא `Human / MintMaker / Other-Bot`, **לא** `Agentic-AI`. login של בוט מעיד על **automation**, לא על כך שסוכן-AI כתב את ה-PR — אין דרך להוכיח authorship של agent מה-actor login בלבד.
+> ⚠️ **A conscious limitation:** the actual split is `Human / MintMaker / Other-Bot`, **not** `Agentic-AI`. A bot login indicates **automation**, not that an AI agent wrote the PR — there is no way to prove agent authorship from the actor login alone.
 >
-> \u200F**CANCELLED** אינו סוג-יוצר אלא **קטגוריית-כשל** — `Canceling since a higher priority...` מסמן שריצה חדשה דחקה ישנה (concurrency), כלומר אין כאן כשל אמיתי.
+> **CANCELLED** is not an author type but a **failure category** — `Canceling since a higher priority...` marks that a new run displaced an old one (concurrency), i.e., there is no real failure here.
 >
-> **אימות actor מול PR-author:** נבדק על 17 PRs ייחודיים (`gh api /pulls/{n}.user.login` מול ה-actor) → **100% התאמה** (17/17). ה-workflows כאן מופעלים ב-`pull_request`, ולכן ה-actor אכן משקף את יוצר ה-PR.
+> **actor vs PR-author verification:** checked on 17 unique PRs (`gh api /pulls/{n}.user.login` vs the actor) → **100% match** (17/17). The workflows here are triggered on `pull_request`, so the actor does reflect the PR author.
 
 ---
 
-## 6. התוצאות — ריפויי הצוות
+## 6. The Results — Team Repos
 
-### טבלה A — קטגוריות ושכבות (% מהכשלים האמיתיים; ריצות בסוגריים)
+### Table A — categories and layers (% of real failures; runs in parentheses)
 
-| קוד / שכבה | MPC | MAY | etcd-shield | namespace-lister |
+| Code / layer | MPC | MAY | etcd-shield | namespace-lister |
 |---|---|---|---|---|
 | **P8 · Test (E2E/perf)** | — | **48%** (84) | — | **8%** (29) ⟨perf⟩ |
 | **P8 · Test (Unit)** | — | 1% (2) | — | — |
@@ -176,112 +176,110 @@
 | W3 · Network | 2% (6) | 3% (5) | 0.3% (1) | 3% (9) |
 | W1 · Resource · W7 · API-rate | — | — | — | 0.3%·0.3% (1·1) |
 | W_BUILD_VET · Build | 13% (31) | — | 0.3% (1) | — |
-| **שכבה: Build** | **82%** | 45% | **99%** | **56%** |
-| **שכבה: Test** | 0% | **49%** | 0% | 8% |
-| **קבוצת-על: Infra Setup** | **15%** | **3%** | **0%** | **5%** |
+| **Layer: Build** | **82%** | 45% | **99%** | **56%** |
+| **Layer: Test** | 0% | **49%** | 0% | 8% |
+| **Super-group: Infra Setup** | **15%** | **3%** | **0%** | **5%** |
 
-> ⟨perf⟩ 29 ה-P8 של nl הם **כולם** קריסת-`[PANICKED!]` דטרמיניסטית בחבילת-perf (`performance_test.go:112`). בשונה מ-MAY (P8 ברובו E2E-flaky), כאן P8 הוא **Real** לחלוטין.
+> ⟨perf⟩ nl's 29 P8s are **all** deterministic `[PANICKED!]` crashes in the perf package (`performance_test.go:112`). Unlike MAY (P8 mostly E2E-flaky), here P8 is fully **Real**.
 
-### טבלה B — היקף, איכות-דאטה, וסוג-יוצר (מכל הריצות)
+### Table B — scope, data quality, and author type (across all runs)
 
-| מדד | MPC | MAY | etcd-shield | namespace-lister |
+| Metric | MPC | MAY | etcd-shield | namespace-lister |
 |---|---|---|---|---|
-| ריצות כושלות | 400 | 248 | 406 | 396 |
+| Failed runs | 400 | 248 | 406 | 396 |
 | CANCELLED | 0 | 0 | 44 (10%) | 21 (5%) |
-| signatures ייחודיים | 11 | 16 | 18 | 26 |
+| Unique signatures | 11 | 16 | 18 | 26 |
 | **MintMaker** | **377 (94%)** | 193 (77%) | **384 (94%)** | 295 (74%)† |
 | **Human** | 16 (4%) | 54 (21%) | 22 (5%) | 16 (4%) |
-| **Other-Bot** (לא Agentic-AI) | 7 (2%) | 1 (0%) | 0 (0%) | **85 (21%)**† |
+| **Other-Bot** (not Agentic-AI) | 7 (2%) | 1 (0%) | 0 (0%) | **85 (21%)**† |
 
-### תת-סיווג P8 (Stage-2) — MAY מול namespace-lister: פרופיל הפוך
+### P8 sub-classification (Stage-2) — MAY vs namespace-lister: an inverted profile
 
-הפיצול להלן הוא פלט מסווג-המשנה (drill-down אמיתי), לא ידני ולא regex.
+The split below is the sub-classifier's output (a real drill-down), not manual and not regex.
 
-**MAY — 86 כשלי P8:**
+**MAY — 86 P8 failures:**
 
-| תת-סיווג | ריצות | confidence | נימוק |
+| Sub-class | Runs | confidence | Rationale |
 |---|---|---|---|
-| **P8-F Flaky** | 2 | **high** | gold-standard: אותו `E2E Tests` הצליח על אותו SHA בדיוק (same-SHA rerun-to-pass) |
-| **P8-F Flaky** | 63 | med | diff-reachability: E2E נפל ב-PRs שנגעו רק ב-deps/Docker/workflow — 0 קוד `.go` + שונות-משך גבוהה |
-| **P8-R Real** | 3 | **high** | `panic: previously registered descriptor` — crash דטרמיניסטי משוחזר |
-| **P8-R Real** | 14 | med | PR 192 ("wire AWS host reconcilers") ששינה `.go`/`*_test.go` → הכשל נגזר מהשינוי |
-| **P8-U Unknown** | 4 | low | הפונקציה שנפלה לא שונתה באף diff — ראיות לא-מספיקות |
+| **P8-F Flaky** | 2 | **high** | gold-standard: the same `E2E Tests` passed on the exact same SHA (same-SHA rerun-to-pass) |
+| **P8-F Flaky** | 63 | med | diff-reachability: E2E failed on PRs that touched only deps/Docker/workflow — 0 `.go` code + high duration variance |
+| **P8-R Real** | 3 | **high** | `panic: previously registered descriptor` — a recovered deterministic crash |
+| **P8-R Real** | 14 | med | PR 192 ("wire AWS host reconcilers") which changed `.go`/`*_test.go` → the failure derives from the change |
+| **P8-U Unknown** | 4 | low | the function that failed was not changed in any diff — insufficient evidence |
 
-**namespace-lister — 29 כשלי P8:**
+**namespace-lister — 29 P8 failures:**
 
-| תת-סיווג | ריצות | confidence | נימוק |
+| Sub-class | Runs | confidence | Rationale |
 |---|---|---|---|
-| **P8-R Real** | 29 | **high** | קריסת-`[PANICKED!]` דטרמיניסטית ב-`performance_test.go:112` — זהה ב-100% מהריצות, חוצה 5 PRs, 0 שינוי `.go`, שונות-משך ≈0. bump-תלות שבר את ה-authorizer ב-runtime |
+| **P8-R Real** | 29 | **high** | a deterministic `[PANICKED!]` crash in `performance_test.go:112` — identical in 100% of runs, across 5 PRs, 0 `.go` change, duration variance ≈0. A dependency bump broke the authorizer at runtime |
 
-> **ניגוד מאלף:** ב-MAY **65/86 (76%) Flaky**; ב-nl **29/29 (100%) Real דטרמיניסטי**. המסקנה: **"P8 גבוה" כשלעצמו אינו מעיד על flakiness** — חייבים את מסווג-המשנה (Stage-2) כדי להבחין בין טסט רועד לבין רגרסיית-מוצר אמיתית שנדחפה ע"י בוט.
+> **An instructive contrast:** in MAY **65/86 (76%) Flaky**; in nl **29/29 (100%) deterministic Real**. The conclusion: **"high P8" by itself does not indicate flakiness** — you need the sub-classifier (Stage-2) to distinguish a shaky test from a real product regression that a bot pushed.
 
-### ממצא מתודולוגי מרכזי: פער-חילוץ שיטתי (Systemic Extraction Gap)
+### Key methodological finding: a Systemic Extraction Gap
 
-בוולידציה הידנית התגלה ששני ה-buckets הגדולים ביותר היו **מקובצים-שגוי**: ה-`raw_error`
-השמור **לא היה שורת-השורש** אלא הד-פקודה / אזהרה שפירה / סימפטום במורד-הזרם:
-- **MAY — 51 שורות שסווגו W4** (המפתח היה הד-הפקודה `cp $HOME/.kube/config`): בפועל **50× P3** (cel-go שינה module-path, שובר `go mod` ב-bump של MintMaker) + **1× W3**. ⟶ W4 קרס 53→2, P3 קפץ 0→50.
-- **etcd — 19 שורות שסווגו P5** (המפתח היה `issues found`, שורת-סיכום של golangci-lint): בפועל **16× P4** + **2× P3** + **1× P5 אמיתי**. ⟶ P5 קרס 19→1, P4 עלה 63→79.
-- **namespace-lister — 10 שורות שסווגו P8 הוחזרו ל-W4** (6× `deployment exceeded its progress deadline` + 4× `before scenario hook failed`) — כשל-**סביבה**, לא assertion.
+In the manual validation it was discovered that the two largest buckets were **mis-grouped**: the stored
+`raw_error` **was not the root line** but a command echo / benign warning / downstream symptom:
+- **MAY — 51 rows classified W4** (the key was the command echo `cp $HOME/.kube/config`): actually **50× P3** (cel-go changed its module-path, breaking `go mod` on a MintMaker bump) + **1× W3**. ⟶ W4 collapsed 53→2, P3 jumped 0→50.
+- **etcd — 19 rows classified P5** (the key was `issues found`, a golangci-lint summary line): actually **16× P4** + **2× P3** + **1× real P5**. ⟶ P5 collapsed 19→1, P4 rose 63→79.
+- **namespace-lister — 10 rows classified P8 were returned to W4** (6× `deployment exceeded its progress deadline` + 4× `before scenario hook failed`) — an **environment** failure, not an assertion.
 
-> **הלקח למסווג:** דדופ לפי `raw_error` גולמי מסתיר הטרוגניות כשה-raw_error עצמו שגוי — **חובה לחלץ את שורת-השורש לפני דדופ**.
+> **The lesson for the classifier:** deduping by raw `raw_error` hides heterogeneity when the raw_error itself is wrong — **you must extract the root line before deduping**.
 >
-> **"הסכמה-עיוורת ≠ אמת":** הוולידציה-העיוורת (agent נפרד שקרא את אותו `raw_error`) **הסכימה עם התוויות השגויות** — ולכן שיעור ה-reconcile ירד 95%→91.5% *דווקא בגלל* התיקון הידני. הסכמה-עיוורת מודדת **שחזוריות** של חוק, לא **נכונות** — רק חילוץ-מחדש מהלוג חשף את האמת.
+> **"Blind agreement ≠ truth":** the blind validation (a separate agent that read the same `raw_error`) **agreed with the wrong labels** — which is why the reconcile rate dropped 95%→91.5% *precisely because of* the manual fix. Blind agreement measures the **reproducibility** of a rule, not its **correctness** — only re-extraction from the log revealed the truth.
 
-### פערי-דאטה — 3 קטגוריות עם 0 דוגמאות
+### Data gaps — 3 categories with 0 examples
 
-מתוך 16 קטגוריות המאמר, **3 עדיין 0 דוגמאות** בכל ארבעת הריפויים: **P6** (CVE — אין gate של govulncheck/Trivy
-ב-workflows שנדגמו), **P7** (benchmark — אין gate), **W8** (version-control בתוך ריצה — נדיר מיסודו: במאמר
-1.6%, רובו pre-CI; 0 בכל הריפויים הוא **צפוי, לא באג**). namespace-lister **מילא 3 פערים קודמים** —
-W1 (runner לא הוקצה), W2 (dispatch ל-workflow מושבת), W7 (dependabot חטף `toomanyrequests`) — כולם דוגמאות
-חיות אמיתיות. היוותרות P6/P7/W8 חסרים היא הסיבה ש**עדיין אי-אפשר לאמן מסווג ML קלאסי** — אין דגימות חיוביות ללמוד מהן.
+Out of the paper's 16 categories, **3 still have 0 examples** across all four repos: **P6** (CVE — no govulncheck/Trivy
+gate in the sampled workflows), **P7** (benchmark — no gate), **W8** (version-control inside a run — inherently rare: 1.6%
+in the paper, mostly pre-CI; 0 across all repos is **expected, not a bug**). namespace-lister **filled 3 prior gaps** —
+W1 (runner not allocated), W2 (dispatch to a disabled workflow), W7 (dependabot hit `toomanyrequests`) — all real
+live examples. P6/P7/W8 remaining absent is the reason it is **still impossible to train a classic ML classifier** — there are no positive samples to learn from.
 
 ---
 
-## 7. קבוצת הבקרה — ESO + Kyverno
+## 7. The Control Group — ESO + Kyverno
 
-הרצנו את **אותו מסווג מאוחד** (עם ולידציה מול live-log/annotation) על 600 הכשלים האחרונים (90 יום)
-של **ESO** (external-secrets) ושל **Kyverno** (kyverno/kyverno) — שני ריפויי CNCF בוגרים שאינם
-מנוהלי-MintMaker. הפרדנו שכבת **fork-PR startup** (ריצות 0-job שנכשלות ב-startup — מנגנון merge-ref
-של GitHub, **לא כשל-קוד**) לפי כלל אחיד: ריצה בלי job-data = startup.
+We ran the **same unified classifier** (with validation against live-log/annotation) on the 600 most recent failures (90 days)
+of **ESO** (external-secrets) and of **Kyverno** (kyverno/kyverno) — two mature CNCF repos that are not
+MintMaker-managed. We separated a **fork-PR startup** layer (0-job runs that fail at startup — GitHub's merge-ref
+mechanism, **not a code failure**) by a uniform rule: a run with no job-data = startup.
 
-| שכבה | ESO | Kyverno |
+| Layer | ESO | Kyverno |
 |---|---|---|
-| (a) **fork-PR startup** (0 jobs, לא כשל-קוד) | 490 (**82%**) | 280 (**47%**) |
-| (b) **כשלים אמיתיים ברמת-job** (השכבה ההשוואתית) | 110 (18%) | 319 (53%) |
+| (a) **fork-PR startup** (0 jobs, not a code failure) | 490 (**82%**) | 280 (**47%**) |
+| (b) **real job-level failures** (the comparison layer) | 110 (18%) | 319 (53%) |
 
-**היפוך-פרופיל מובהק מול הצוות (רמת-job):**
+**A clear profile inversion vs the team (job-level):**
 
-| ממד | ריפויי הצוות | ESO | Kyverno |
+| Dimension | Team repos | ESO | Kyverno |
 |---|---|---|---|
-| נכתב ע"י בוט-תשתית (MintMaker) | **74%–94%** | **0%** | **0%** |
-| תלות (P3+P4) | **41%–93%** | **~3%** | 20% (תערובת אדם/Dependabot) |
-| נכתב ע"י בני-אדם | 4%–21% | **86%** | **62%** |
-| מצב-הכשל הדומיננטי | bump-תלות אוטומטי שבור | fork-PR startup + איכות אנושית | פיתוח אנושי (compile/test) + fork-startup |
+| Authored by an infra bot (MintMaker) | **74%–94%** | **0%** | **0%** |
+| Dependency (P3+P4) | **41%–93%** | **~3%** | 20% (human/Dependabot mix) |
+| Authored by humans | 4%–21% | **86%** | **62%** |
+| Dominant failure mode | broken automatic dependency bump | fork-PR startup + human quality | human development (compile/test) + fork-startup |
 
-**הניואנס ב-Kyverno:** שני ה"בוטים" שלו (`kyverno-pr-updater[bot]`, `kyverno-bot`) הם אוטומציה
-פנימית, לא בוט-תלויות; ה-P4 שלו הוא תערובת של שינויי-API אנושיים (`not enough arguments in call
-to buildWebhook`) ו-Dependabot קהילתי, **לא מפעל-bumps**. המצב הדומיננטי שלו הוא פיתוח אנושי:
-P1 קומפילציה (12%), P5 lint, P8 טסטים — כולם נתפסים לפני merge.
+**The nuance in Kyverno:** its two "bots" (`kyverno-pr-updater[bot]`, `kyverno-bot`) are internal
+automation, not a dependency bot; its P4 is a mix of human API changes (`not enough arguments in call
+to buildWebhook`) and community Dependabot, **not a bump factory**. Its dominant mode is human development:
+P1 compile (12%), P5 lint, P8 tests — all caught before merge.
 
-> **הערת-כנות:** לשתי הבנצ'מרקים יש שיעור `UNCLASSIFIED` גבוה בשכבה (b) (~73% ESO, ~48% Kyverno) בגלל פער-החילוץ. אך האות הכמותי הנקי — `author_type` ושיעורי ה-MintMaker/תלות — חד-משמעי.
-
----
-
-## 8. מסקנות
-
-1. **דומיננטיות עדכוני-התלות אצלנו היא תוצר של שיטת-הניהול, לא של "CI ב-Go".** אותו מסווג בדיוק, על **שני** ריפויי Go בוגרים שאינם מנוהלי-MintMaker, מראה פרופיל **הפוך**: 0% MintMaker ו-~3%/20% תלות מול 74%–94% MintMaker ו-41%–93% תלות אצלנו. המשתנה המבחין הוא **מי דוחף קוד** (בוט MintMaker מול בני-אדם), לא השפה ולא ה-CI.
-2. **זו גם בשורה טובה.** רוב הכשלים אצלנו אינם באגים בקוד או ב-CI — הם bumps אוטומטיים שבורים, **צפויים וניתנים-לתיקון-ע"י-בוט** (P3/P4 = MintMaker-fixable). ה-CI עושה את עבודתו: תופס שבירות-תלות לפני merge.
-3. **לכל ריפו "חתימה" משלו** — אין "כשל CI" יחיד: MPC/nl נשלטים ע"י P4, etcd ע"י P3, MAY ע"י P8, ESO ע"י fork-startup, Kyverno ע"י compile/test אנושי. המסווג מאפשר לנהל כל ריפו לפי הפרופיל שלו.
-4. **"כשל CI" אינו אחיד, ו-"P8 גבוה" ≠ flaky** — חייבים מסווג רב-ריפו + מסווג-משנה Stage-2 (MAY 76% flaky מול nl 100% Real).
-5. **ולידציה ידנית הכרחית** — קריאת `raw_error` גולמי לבדה טעתה בכל ריפו, לעתים בקנה-מידה. חובה לחלץ שורת-שורש לפני דדופ.
-6. **Data-Quality:** לוגים פגים אחרי 90 יום (410 Gone) אך **annotations שורדות** — חובה **איסוף יומי רציף**. (הערה: `NO_LOG` מאחד שני מצבים — לוג שפג, *וגם* ריצה ללא job כלל כמו fork-PR startup בבנצ'מרקים; ראו §7.)
+> **A candid note:** both benchmarks have a high `UNCLASSIFIED` rate in layer (b) (~73% ESO, ~48% Kyverno) due to the extraction gap. But the clean quantitative signal — `author_type` and the MintMaker/dependency rates — is unambiguous.
 
 ---
 
-## מתודולוגיית-שקיפות
+## 8. Conclusions
 
-כל טענה אומתה מול לוג/annotation חי. העדפנו "לא ניתן לקבוע" (`NO_LOG`/`UNCLASSIFIED`) על ניחוש.
-המסווג מאוחד על פני כל הריפויים (בלי fork per-repo), וכל שינוי בו עובר בדיקת no-regression על כל
-הדאטה-סטים. עדות האימות: [verify/](verify/).
+1. **The dominance of dependency updates in our repos is a product of the management method, not of "Go CI".** The exact same classifier, on **two** mature Go repos that are not MintMaker-managed, shows an **inverted** profile: 0% MintMaker and ~3%/20% dependency vs 74%–94% MintMaker and 41%–93% dependency in our repos. The distinguishing variable is **who pushes code** (the MintMaker bot vs humans), not the language or the CI.
+2. **This is also good news.** Most of our failures are not bugs in the code or in CI — they are broken automatic bumps, **predictable and bot-fixable** (P3/P4 = MintMaker-fixable). CI is doing its job: catching dependency breakages before merge.
+3. **Each repo has its own "signature"** — there is no single "CI failure": MPC/nl are dominated by P4, etcd by P3, MAY by P8, ESO by fork-startup, Kyverno by human compile/test. The classifier lets each repo be managed by its own profile.
+4. **"CI failure" is not uniform, and "high P8" ≠ flaky** — you need a multi-repo classifier + a Stage-2 sub-classifier (MAY 76% flaky vs nl 100% Real).
+5. **Manual validation is essential** — reading raw `raw_error` alone was wrong in every repo, sometimes at scale. You must extract a root line before deduping.
+6. **Data-Quality:** logs expire after 90 days (410 Gone) but **annotations survive** — continuous **daily collection** is a must. (Note: `NO_LOG` conflates two states — an expired log, *and also* a run with no job at all, such as fork-PR startup in the benchmarks; see §7.)
 
-</div>
+---
+
+## Transparency Methodology
+
+Every claim was verified against a live log/annotation. We preferred "cannot determine" (`NO_LOG`/`UNCLASSIFIED`)
+over a guess. The classifier is unified across all repos (no per-repo fork), and every change to it passes a
+no-regression check on all the datasets. The validation evidence: [verify/](verify/).
