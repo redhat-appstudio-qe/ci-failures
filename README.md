@@ -69,6 +69,10 @@ ci-failures/
 log (with a fallback to check-run annotations when the log has expired), classifies it with
 `classify.py`, and writes the CSVs.
 
+Note the two stages run at **different times**: `classify.py` runs *inside* `pipeline.py` (imported,
+called per run), whereas `p8_subclassify.py` is a **separate run you launch afterward** on the
+produced dataset (see "How to Run" below). The arrow above shows the logical flow, not a single process.
+
 ---
 
 ## Prerequisites
@@ -85,8 +89,29 @@ python3 Code/pipeline.py --list          # list the configured repos
 python3 Code/pipeline.py kyverno         # re-classify one repo → writes its output files
 ```
 
+**You pick the repo** — the argument (`kyverno` above) is a *repo-key*, not a free-text value and
+not random. The valid keys are a closed, known list defined in [repos.py](Code/repos.py) (`mpc`,
+`may`, `etcd`, `nl`, `eso`, `kyverno`). The pipeline reads your key from the command line, looks it
+up in that list, and derives everything from it: which GitHub repo to query, which `DATA/<REPO>/`
+directory to read/write, and the filename prefix. An unknown key exits with an error listing the
+valid ones; `--list` prints them all.
+
 Runs are cached under `DATA/<REPO>/cache`, so a re-run is instant and works offline too.
 Deleting a repo's `cache/` forces a re-fetch from GitHub.
+
+### Stage 2 — P8 sub-classification (a separate run)
+
+`pipeline.py` is **Stage 1**: it calls `classify.py` in-process (one call per run) and stops at
+`_dataset_all.csv`. **Stage 2 is a separate script you run afterward**, only for test failures (P8).
+It is *not* invoked by `pipeline.py`:
+
+```bash
+python3 Code/p8_subclassify.py DATA/MAY/may_dataset_all.csv   # → writes _p8_subclass.csv
+```
+
+It reads the dataset produced by Stage 1, filters to `category == "P8"`, and does its own GitHub
+drill-down (PR patch + same-SHA reruns) to decide **Real / Flaky / Unknown**. This is why only repos
+with meaningful P8 volume (MAY, namespace-lister) have a `_p8_subclass.csv`.
 
 **Key output columns** in `<pre>_dataset_all.csv`: `category` (P1..P8 / W1..W8 / NO_LOG / …),
 `cat_label`, `fixable_by`, `author_type` (MintMaker / Other-Bot / Human for team repos;
