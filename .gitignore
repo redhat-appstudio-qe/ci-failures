@@ -1,0 +1,16 @@
+# Per-run API/log caches — large (~200MB) and fully reproducible from GitHub.
+# Deleting them only makes the next pipeline run slower (it re-downloads).
+**/cache/
+**/cache_ann/
+
+# Python
+__pycache__/
+*.pyc
+
+# Stray run logs / scratch output
+*.log
+*.err
+*.out
+
+# Validation evidence — local only
+verify/
