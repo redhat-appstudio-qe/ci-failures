@@ -15,8 +15,25 @@ Requirements: Python 3 stdlib only + the `gh` CLI, authenticated (`gh auth statu
 Per-run API responses + logs are CACHED under <datadir>/cache so re-runs are instant.
 
 To collect the input TSV for a repo, see README.md ("Collecting the raw runs").
+
+ARCHITECTURE (how to read this file)
+------------------------------------
+This is the ENGINE/orchestrator. Think of it as four layers:
+  A. GitHub access  — the only code that talks to the network (sh/api, fetch_bundle,
+                      check_runs_for); everything is cached to disk per run_id / per sha.
+  B. Signal extraction — turn a messy multi-thousand-line log into one root-cause error line
+                      (the regexes + extract + the annotation-fallback recover).
+  C. Tagging/enrichment — add context around that line (pick_steps, author_type via repos.py,
+                      norm_sig for dedup, test_subreason).
+  D. Orchestration  — the CLI + the main loop that calls all the above in order, invokes the
+                      Stage-1 brain classify.classify() PER RUN, dedups, and writes the CSVs.
+Note: Stage 1 (classify.py) runs IN-PROCESS here (imported, called in the loop). Stage 2
+(p8_subclassify.py) is a SEPARATE script you run afterward — it is not called from this file.
 """
 import json, subprocess, re, csv, sys, os, collections
+# ---- Block (layer D): imports & path wiring ----
+# arch: resolves the project root (DATA/ sits next to Code/) and pulls in the two external modules
+# this engine depends on: classify.py (the Stage-1 brain) and repos.py (the per-repo registry).
 CODE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(CODE_DIR)            # project root (DATA/ lives here, next to Code/)
 sys.path.insert(0, CODE_DIR)
@@ -24,6 +41,10 @@ from classify import classify, LABEL, STAGE, fixable_by   # shared Stage-1 engin
 from repos import REPOS, author_type                       # per-repo config
 
 # ---------- CLI ----------
+# ---- Block (layer D): CLI — which repo are we running? ----
+# arch: reads a repo-KEY from argv and looks it up in repos.py's REPOS (a closed list; --list prints
+# it). From the one key it derives everything for this run: the GitHub repo, the DATA/<repo>/ dir,
+# the filename prefix, and the two cache dirs. The code stays fully repo-agnostic.
 args = sys.argv[1:]
 if not args or args[0] in ("-h", "--help"):
     print(__doc__); sys.exit(0)
@@ -43,6 +64,9 @@ os.makedirs(CACHE, exist_ok=True); os.makedirs(ANN, exist_ok=True)
 if not os.path.exists(SRC):
     sys.exit(f"missing input {SRC} (see README: 'Collecting the raw runs')")
 
+# ---- Block (layer A): GitHub access primitives ----
+# arch: the ONLY place that shells out to the network. sh() runs any command; api() wraps `gh api`
+# and returns parsed JSON. Every GitHub call in this file funnels through these two.
 def sh(a): return subprocess.run(a, capture_output=True, text=True, errors="ignore").stdout
 def api(p):
     o = sh(["gh", "api", p])
@@ -50,6 +74,10 @@ def api(p):
     except Exception: return None
 
 # ---- regexes (extraction) ----
+# ---- Block (layer B): the extraction "dictionary" ----
+# arch: the distilled knowledge of which log lines are noise vs. truth. WRAP = value-less wrappers,
+# CMD_ECHO = echoed commands, NOISE = benign chatter, STRONG = gold root-cause lines, SIGNAL = weak
+# hint. extract() below uses these to pick the one real error line. This is the project's core IP.
 WRAP = re.compile(r"process completed with exit code|^make(\[\d+\])?: \*\*\*|^make(\[\d+\])?: leaving|"
                   r"error \d+$|exit status \d+$|^error: failed after|FAIL\s+github|ginkgo ran \d+|"
                   r"test suite failed|there were failures detected", re.I)
@@ -70,6 +98,11 @@ STRONG = re.compile(r"\.go:\d+:\d+:|does not implement|impossible type assertion
 SIGNAL = re.compile(r"error|fail|fatal|refused|denied|forbidden|invalid|cannot|not found|conflict|timeout|panic|"
                     r"unable|no such|does not implement|undefined|expected", re.I)
 
+# ---- Block (layer B): extract() \u2014 the heart ----
+# arch: "thousands of log lines -> one root-cause line." Pure text, no network. It scopes to the
+# failed job's lines, then tries 5 passes in DESCENDING confidence (error-marked STRONG -> any
+# STRONG -> weak error-marked -> backward scan from a WRAP anchor -> last SIGNAL), rejecting
+# WRAP/CMD_ECHO/NOISE each time. Returns "" when nothing usable survives (-> drives NO_LOG / fallback).
 def strip_line(raw):
     p = raw.split("\t"); job = p[0].strip() if len(p) >= 3 else ""; msg = p[-1]
     msg = re.sub(r"^\ufeff?\d{4}-\d{2}-\d{2}T[\d:.]+Z\s*", "", msg).strip()  # drop ts, KEEP ##[error]
@@ -107,6 +140,9 @@ def extract(log, failed_job):
         if SIGNAL.search(c) and not WRAP.search(c): return c[:220]
     return ""
 
+# ---- Block (layer C): pick_steps — causing vs reporting ----
+# arch: within a failed job, separate the step that CAUSED the failure from a later step that merely
+# REPORTED it (upload/notify/comment, matched by REPORT). We keep the cause; feeds causing_step.
 REPORT = re.compile(r"report|post |upload|cleanup|notify|comment|status|slack|annotat|complete job", re.I)
 def pick_steps(job):
     failed = [s.get("name", "") for s in job.get("steps", []) if s.get("conclusion") == "failure"]
@@ -114,6 +150,10 @@ def pick_steps(job):
     reporting = next((s for s in failed if REPORT.search(s)), "")
     return causing, reporting
 
+# ---- Block (layer C): norm_sig — the dedup signature ----
+# arch: collapse an error line into a normalized "signature" so near-identical failures group
+# together — first by a table of known families, then by generic masking (paths/UUIDs/versions/
+# numbers). Powers the _diverse.csv (one row per unique signature). Pure text, no network.
 def norm_sig(err):
     if not err: return "<none>"
     le = err.lower()
@@ -140,6 +180,9 @@ def norm_sig(err):
     s = re.sub(r"[0-9a-f]{7,40}", "<HASH>", s); s = re.sub(r"/[\w.\-/]+", "<PATH>", s); s = re.sub(r"\d+", "<N>", s)
     return re.sub(r"\s+", " ", s).strip().lower()[:80]
 
+# ---- Block (layer C): test_subreason — tiny P8/W4 tag ----
+# arch: a small enrichment flag for test-ish categories (cluster-not-ready vs. real assertion vs.
+# unclear). Pure text; a lightweight hint, not the authoritative Stage-2 (that is p8_subclassify.py).
 def test_subreason(c, err):
     if c not in ("P8", "W4"): return ""
     e = err.lower()
@@ -148,6 +191,11 @@ def test_subreason(c, err):
     return "test-stage, cause unclear"
 
 # ---- annotation recovery (cached per sha) ----
+# ---- Block (layers A+B): the annotation fallback ----
+# arch: Plan B for when the live log yielded nothing (often because it EXPIRED, 410 Gone, after ~90
+# days). check_runs_for() (layer A) fetches the commit's check-runs + their annotations from GitHub
+# (cached per sha); recover() (layer B) picks the best message — preferring the failed job's OWN
+# check-run for truthful attribution — or flags a concurrency-cancel. Annotations outlive logs.
 WRAP_ANN = re.compile(r"process completed with exit code|^exit with code \d+\s*$|^\s*$", re.I)
 def check_runs_for(sha):
     cf = os.path.join(ANN, f"{sha}.json")
@@ -192,6 +240,10 @@ def recover(sha, workflow, failed_job=""):
     return (pick, "yes") if pick else ("", "no")
 
 # ---- fetch bundle (cached): run meta + jobs + failed-log ----
+# ---- Block (layer A): fetch_bundle — the 3 GitHub pulls per run ----
+# arch: for one run_id, (1) run metadata (sha/actor/PR), (2) its jobs+steps (to find the failed job
+# and causing/reporting steps), (3) the failed-log text. Checks the on-disk cache FIRST — a cache hit
+# returns instantly with no network, which is what makes re-runs instant and offline-capable.
 def fetch_bundle(rid, tag):
     cf = os.path.join(CACHE, f"{rid}.json")
     if os.path.exists(cf):
@@ -214,6 +266,11 @@ def fetch_bundle(rid, tag):
     json.dump(b, open(cf, "w")); return b
 
 # ---- main ----
+# ---- Block (layer D): the main loop — where everything connects ----
+# arch: LOOP over every run in the TSV. Per run: fetch_bundle (A) -> author_type via repos.py (C) ->
+# extract from live log (B); if empty, recover from annotations (B) -> else signal is NO_LOG. Then the
+# key step — classify(causing_step, err) (shared Stage-1 brain) returns the category — and we build one
+# output row with all columns. This is the only place Stage 1 actually runs.
 runs = []
 for line in open(SRC):
     p = line.rstrip("\n").split("\t")
@@ -247,6 +304,9 @@ for n, (tag, rid, ts, url) in enumerate(runs, 1):
       "stage": STAGE[c], "fixable_by": fixable_by(c), "test_subreason": test_subreason(c, err),
       "raw_error": err, "failure_signature": norm_sig(err), "flaky_signal": "", "signal_source": src})
 
+# ---- Block (layer D): dedup + write outputs ----
+# arch: build `diverse` (one row per unique failure_signature) and write both CSVs — _dataset_all.csv
+# (every run) and _diverse.csv (unique failures) — then print a summary (live/ann/cancel/none + dist).
 # NOTE: _diverse.csv (and the separately-generated _p8_subclass.csv) are DERIVED from the
 # rows below. If _dataset_all.csv is ever regenerated on its own, those derived files can lag
 # until this pipeline (and p8_subclassify.py) are re-run — they are not guaranteed in lockstep.

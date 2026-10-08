@@ -38,12 +38,31 @@ CONFIDENCE
 import csv, re, subprocess, json, collections, sys
 from datetime import datetime
 
+# ============================================================================================
+# ARCHITECTURE (how this file fits the project)
+# This is Stage 2 — a SEPARATE script, run manually AFTER pipeline.py, only on category=="P8".
+# It is NOT imported by pipeline.py. It reads the dataset CSV that Stage 1 produced (another file),
+# keeps only the P8 rows, and for each one DRILLS DOWN into GitHub (PR patch + same-SHA reruns) to
+# decide Real / Flaky / Unknown with a confidence. Output = a new _p8_subclass.csv.
+# The file is organized in four blocks: [1] module state + URL parsing, [2] GitHub access
+# primitives, [3] cached GitHub drill-downs, [4] pure diff/text analysis, then main() orchestrates.
+# ============================================================================================
+
+# ---- Block [1]: module state + URL parsing (no network) ----
+# arch: process-level memo caches so each (PR / SHA / run) is fetched from GitHub at most once
+# within a run; repo_from_url makes this repo-agnostic — the GitHub repo is inferred per row from
+# its run_url, so the same script works on any repo's dataset.
 _files_cache, _success_cache, _sha_cache = {}, {}, {}
 
 
 def repo_from_url(url):
     m = re.search(r"github\.com/([^/]+/[^/]+)/actions", url or "")
     return m.group(1) if m else None
+
+
+# ---- Block [2]: GitHub access primitives (the only network layer) ----
+# arch: every GitHub call in this file goes through these two `gh api` wrappers (one JSON, one raw
+# text/tsv). Isolating them here keeps the drill-down helpers below easy to reason about and cache.
 
 
 def gh_json(args):
@@ -63,6 +82,10 @@ def gh_text(args):
         return None
 
 
+# ---- Block [3]: cached GitHub drill-downs (network, memoized) ----
+# arch: the per-run evidence fetchers. Each hits the GitHub API once (then the Block-[1] cache),
+# supplying the raw material for the flaky heuristics: the PR's changed files+patches, the run's
+# full commit SHA, and whether the SAME workflow already passed on that exact SHA (the gold standard).
 def pr_files(repo, pr):
     """Fetch changed files WITH their patch (for diff-reachability). Cached."""
     if not repo or not pr:
@@ -124,6 +147,11 @@ def same_sha_success(repo, run_id, workflow):
     return res
 
 
+# ---- Block [4]: pure analysis (NO network) ----
+# arch: these operate only on data already in hand — the PR patches from Block [3] and the stored
+# raw_error text. They turn raw material into the signals the verdict uses: was .go / test code
+# touched, was the failing test's own function edited (DeFlaker diff-reachability), and what the
+# error line reveals (deterministic crash? failed test names? per-run durations?).
 def touched_go_code(files):
     return None if files is None else any(f["filename"].endswith(".go") for f in files)
 
@@ -171,6 +199,14 @@ def is_wrapper(name):
     return bool(re.match(r"TestE2E|TestSuite|TestMain|TestAll", name or ""))
 
 
+# ============================================================================================
+# Block: the orchestrator.
+# arch: reads the Stage-1 dataset CSV (another file), keeps only P8 rows, then runs three passes:
+#   (2a) a LOOP per PR to measure recurrence + duration variance,
+#   cross-PR  — a LOOP flagging suites that fail across >=2 PRs without touching any .go,
+#   (2b) a LOOP per run that combines all evidence into one Real/Flaky/Unknown verdict + confidence.
+# Finally it writes the enriched rows to _p8_subclass.csv. All GitHub access happens via Blocks [2]/[3].
+# ============================================================================================
 def main():
     if len(sys.argv) < 2:
         sys.exit("usage: p8_subclassify.py <dataset.csv> [out.csv]")

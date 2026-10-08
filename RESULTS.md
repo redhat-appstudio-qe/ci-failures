@@ -282,4 +282,4 @@ P1 compile (12%), P5 lint, P8 tests — all caught before merge.
 
 Every claim was verified against a live log/annotation. We preferred "cannot determine" (`NO_LOG`/`UNCLASSIFIED`)
 over a guess. The classifier is unified across all repos (no per-repo fork), and every change to it passes a
-no-regression check on all the datasets. The validation evidence: [verify/](verify/).
+no-regression check on all the datasets.

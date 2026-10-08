@@ -46,14 +46,13 @@ ci-failures/
 
 ---
 
-## The Three Project Layers
+## The Two Project Layers
 
 1. **Code (`Code/`)** — shared, not duplicated per-repo. A change in `classify.py` affects all of them.
 2. **Data (6 directories)** — separate per repo. **Near-identical structure** (same files; small
    column differences depending on when the repo was collected — e.g., `signal_source`/`tag` exist
    only in repos collected later), but each `*_dataset_all.csv` holds a different repo —
    **this is not duplication, it's separation.**
-3. **Validation (`verify/`)** — the evidence that the classifier is right (manual blind audit).
 
 ---
 
